@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enhanced Product Catalog Upload</title>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <!-- Bootstrap CSS -->
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+  <!-- Google Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.15.3/css/all.css">
+  <style>
+    body {
+      padding-top: 50px;
+      font-family: 'Nunito', sans-serif;
+      background: #f8f9fa;
+    }
+    .container {
+      max-width: 800px;
+      margin: auto;
+      background: #ffffff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+      font-weight: 700;
+      color: #32325d;
+      margin-bottom: 25px;
+    }
+    .custom-file-label {
+      background-color: #f5f6f7;
+    }
+    .btn-custom {
+      background-color: #5e72e4;
+      color: white;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .btn-custom:hover {
+      background-color: #4e62cc;
+    }
+    .form-section {
+      margin-bottom: 30px;
+    }
+    .alert-custom {
+      display: none;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    .validation-errors {
+      display: none;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .validation-errors li {
+      font-size: 14px;
+      color: #721c24;
+    }
+    .error-listing {
+      margin-bottom: 20px;
+    }
+    .error-heading {
+      cursor: pointer;
+    }
+    .correction-input {
+      width: auto;
+      display: block;
+      margin-bottom: 10px;
+      padding: 5px;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+    }
+    .submit-corrections-btn {
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-light bg-light">
+  <div class="container">
+    <a class="navbar-brand" href="#">CatalogApp</a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarNav">
+      <ul class="navbar-nav ml-auto">
+        <li class="nav-item active">
+          <a class="nav-link" href="#">Home</a>
+        </li>
+        <!-- Add other navigation links here -->
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<div class="container text-center">
+  <h1>Product Catalog Upload</h1>
+  <div class="form-section">
+    <form id="uploadForm" enctype="multipart/form-data">
+      <div class="custom-file mb-3">
+        <input type="file" class="custom-file-input" id="excelFile" name="excel" accept=".xlsx, .xls" required />
+        <label class="custom-file-label" for="excelFile">Choose file...</label>
+      </div>
+      <button type="button" id="uploadButton" class="btn btn-custom btn-block">Upload</button>
+    </form>
+  </div>
+
+  <div id="validationResult" class="alert alert-custom"></div>
+  <div id="errorListing" class="error-listing"></div>
+</div>
+<script>
+    $(document).ready(function() {
+      $('.custom-file-input').on('change', function() {
+        let fileName = $(this).val().split('\\').pop();
+        $(this).next('.custom-file-label').addClass("selected").html(fileName);
+      });
+    
+      $('#uploadButton').click(function(e) {
+        e.preventDefault(); // Prevent the default form submission
+        var formData = new FormData($('#uploadForm')[0]);
+    
+        $.ajax({
+          url: '/upload',
+          type: 'POST',
+          data: formData,
+          processData: false,
+          contentType: false,
+          beforeSend: function() {
+            $('#validationResult').hide();
+            $('#errorListing').hide().empty();
+          },
+          success: function(data) {
+            if (data.sessionId) {
+                sessionStorage.setItem('sessionId', data.sessionId); 
+            }
+            let errorMessages = '';
+            if (!data.isValid) {
+              if (data.validationErrors && data.validationErrors.length > 0) {
+                errorMessages += "<strong>Validation errors found:</strong><ul>";
+                data.validationErrors.forEach(error => {
+                  error.errors.forEach(err => {
+                    errorMessages += `<li>Row ${error.row}: ${err}</li>`;
+                  });
+                });
+                errorMessages += "</ul>";
+              }
+              if (data.correctnessErrors && data.correctnessErrors.length > 0) {
+                errorMessages += "<strong>Correctness errors found:</strong><ul>";
+                data.correctnessErrors.forEach(error => {
+                  error.errors.forEach(err => {
+                    const errorDetail = err.split(' at cell ');
+                    const cell = errorDetail[1].split(': ')[0];
+                    const value = errorDetail[1].split(': ')[1];
+                    errorMessages += `<li>${errorDetail[0]} at cell ${cell} with value ${value}: `;
+                    errorMessages += `<input type='text' class='correction-input' `;
+                    errorMessages += `data-row='${error.row}' data-cell='${cell}' value='${value}'/></li>`;
+                  });
+                });
+                errorMessages += "</ul>";
+              }
+              errorMessages += "<button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
+              $('#validationResult')
+                .show()
+                .removeClass('alert-success')
+                .addClass('alert-danger')
+                .html(errorMessages);
+            } else {
+              $('#validationResult')
+                .show()
+                .removeClass('alert-danger')
+                .addClass('alert-success')
+                .text(data.message);
+            }
+          },
+          error: function(xhr) {
+            $('#validationResult')
+              .show()
+              .removeClass('alert-success')
+              .addClass('alert-danger')
+              .text('Upload failed: ' + xhr.responseText);
+          }
+        });
+      });
+
+      $(document).on('click', '#submitCorrections', function() {
+        const corrections = [];
+        $('.correction-input').each(function() {
+            const row = $(this).data('row');
+            const cell = $(this).data('cell');
+            const newValue = $(this).val();
+            corrections.push({ row, cell, newValue });
+        });
+
+        $.ajax({
+            url: '/submit-corrections',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ corrections, sessionId: sessionStorage.getItem('sessionId') }),
+            success: function(response) {
+                $('#validationResult')
+                    .removeClass('alert-danger')
+                    .addClass('alert-success')
+                    .text('Corrections updated successfully.');
+            },
+            error: function(xhr) {
+                $('#validationResult')
+                    .removeClass('alert-success')
+                    .addClass('alert-danger')
+                    .text('An error occurred: ' + xhr.responseText);
+            }
+        });
+      });
+    });
+</script>
+
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>
