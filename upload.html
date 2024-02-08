@@ -135,86 +135,118 @@
             $('#errorListing').hide().empty();
           },
           success: function(data) {
-            if (data.sessionId) {
-                sessionStorage.setItem('sessionId', data.sessionId); 
-            }
-            let errorMessages = '';
-            if (!data.isValid) {
-              if (data.validationErrors && data.validationErrors.length > 0) {
-                errorMessages += "<strong>Validation errors found:</strong><ul>";
-                data.validationErrors.forEach(error => {
-                  error.errors.forEach(err => {
+    if (data.sessionId) {
+        sessionStorage.setItem('sessionId', data.sessionId); 
+    }
+    let errorMessages = '';
+    if (!data.isValid) {
+        errorMessages += "<strong>Validation errors found:</strong><ul>";
+        if (data.validationErrors && data.validationErrors.length > 0) {
+            data.validationErrors.forEach(error => {
+                error.errors.forEach(err => {
                     errorMessages += `<li>Row ${error.row}: ${err}</li>`;
-                  });
                 });
-                errorMessages += "</ul>";
-              }
-              if (data.correctnessErrors && data.correctnessErrors.length > 0) {
-                errorMessages += "<strong>Correctness errors found:</strong><ul>";
-                data.correctnessErrors.forEach(error => {
-                  error.errors.forEach(err => {
+            });
+        }
+        if (data.correctnessErrors && data.correctnessErrors.length > 0) {
+            data.correctnessErrors.forEach(error => {
+                error.errors.forEach(err => {
                     const errorDetail = err.split(' at cell ');
                     const cell = errorDetail[1].split(': ')[0];
-                    const value = errorDetail[1].split(': ')[1];
-                    errorMessages += `<li>${errorDetail[0]} at cell ${cell} with value ${value}: `;
+                    const value = errorDetail[1].split(': ')[1].replace(/'$/, "");
+                    errorMessages += `<li>${errorDetail[0]} at cell ${cell} with value '${value}': `;
                     errorMessages += `<input type='text' class='correction-input' `;
                     errorMessages += `data-row='${error.row}' data-cell='${cell}' value='${value}'/></li>`;
-                  });
                 });
-                errorMessages += "</ul>";
-              }
-              errorMessages += "<button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
-              $('#validationResult')
-                .show()
-                .removeClass('alert-success')
-                .addClass('alert-danger')
-                .html(errorMessages);
-            } else {
-              $('#validationResult')
-                .show()
-                .removeClass('alert-danger')
-                .addClass('alert-success')
-                .text(data.message);
-            }
-          },
+            });
+        }
+        errorMessages += "</ul><button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
+        $('#validationResult')
+            .show()
+            .removeClass('alert-success')
+            .addClass('alert-danger')
+            .html(errorMessages);
+    } else {
+        $('#validationResult')
+            .show()
+            .removeClass('alert-danger')
+            .addClass('alert-success')
+            .text(data.message);
+        $('#errorListing').empty().hide();
+    }
+},
+
           error: function(xhr) {
             $('#validationResult')
               .show()
               .removeClass('alert-success')
               .addClass('alert-danger')
               .text('Upload failed: ' + xhr.responseText);
+            $('#errorListing').empty().hide();
           }
         });
       });
 
       $(document).on('click', '#submitCorrections', function() {
-        const corrections = [];
-        $('.correction-input').each(function() {
-            const row = $(this).data('row');
-            const cell = $(this).data('cell');
-            const newValue = $(this).val();
-            corrections.push({ row, cell, newValue });
-        });
+    const corrections = [];
+    $('.correction-input').each(function() {
+        const row = $(this).data('row');
+        const cell = $(this).data('cell');
+        const newValue = $(this).val();
+        corrections.push({ row, cell, newValue });
+    });
 
-        $.ajax({
-            url: '/submit-corrections',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ corrections, sessionId: sessionStorage.getItem('sessionId') }),
-            success: function(response) {
-                $('#validationResult')
-                    .removeClass('alert-danger')
-                    .addClass('alert-success')
-                    .text('Corrections updated successfully.');
-            },
-            error: function(xhr) {
-                $('#validationResult')
-                    .removeClass('alert-success')
-                    .addClass('alert-danger')
-                    .text('An error occurred: ' + xhr.responseText);
-            }
+    $.ajax({
+        url: '/submit-corrections',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ corrections, sessionId: sessionStorage.getItem('sessionId') }),
+        success: function(response) {
+    // Check if there are new validity errors after submitting corrections
+    if (response.validityErrors && response.validityErrors.length > 0) {
+        // Clear previous errors and correction inputs
+        $('#errorListing').empty();
+        let errorMessages = "<strong>Further validation errors found:</strong><ul>";
+        response.validityErrors.forEach(error => {
+            error.errors.forEach(err => {
+                // Extract the attribute and cell reference from the error message
+                const match = err.match(/Invalid '(.+)' at cell '(.+)': '(.+)'/);
+                const attribute = match ? match[1] : "Unknown Attribute";
+                const cellReference = match ? match[2] : "Unknown Cell";
+                const invalidValue = match ? match[3] : "Unknown Value";
+                errorMessages += `<li>${err}</li>`;
+                errorMessages += `<li>Correction for ${attribute} (Cell ${cellReference}, Invalid Value: ${invalidValue}): `;
+                errorMessages += `<input type='text' class='correction-input' data-row='${error.row}' data-cell='${cellReference}' placeholder='Enter correct value'/></li>`;
+            });
         });
-      });
+        errorMessages += "</ul>";
+        errorMessages += "<button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
+        $('#validationResult')
+            .show()
+            .removeClass('alert-success')
+            .addClass('alert-danger')
+            .html(errorMessages);
+        $('#errorListing').show();
+    } else {
+        // Handle success
+        $('#validationResult')
+            .removeClass('alert-danger')
+            .addClass('alert-success')
+            .text('All corrections updated successfully.');
+        $('#errorListing').empty().hide(); // Clear and hide the error listing
+    }
+},
+
+
+        error: function(xhr) {
+            $('#validationResult')
+                .removeClass('alert-success')
+                .addClass('alert-danger')
+                .text('An error occurred: ' + xhr.responseText);
+        }
+    });
+});
+
     });
 </script>
 

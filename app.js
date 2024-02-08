@@ -8,6 +8,7 @@ const port = 3000;
 const app = express();
 app.use(express.json());
 const sessionTables = {};
+const validateRow = require('./validation');
 
 const categories = JSON.parse(fs.readFileSync('./categories.json', 'utf8'));
 
@@ -45,10 +46,12 @@ app.post('/upload', upload.single('excel'), async (req, res) => {
     
         if (!categoryAttributes) {
             console.log(`Invalid main_category '${mainCategory}' at row ${rowNumber}.`);
-            validationErrors.push({
+            // When pushing main_category errors into the validationErrors array
+            correctnessErrors.push({
                 row: rowNumber,
-                errors: [`Invalid main_category '${mainCategory}' at cell C${rowNumber}.`]
+                errors: [`Invalid 'main_category' at cell C${rowNumber} with value '${mainCategory}'. Must be one of: [${Object.keys(categories).join(", ")}]`]
             });
+
             continue; // Skip further processing for this row
         }
     
@@ -85,22 +88,6 @@ app.post('/upload', upload.single('excel'), async (req, res) => {
         sessionId: sessionId  // Send this back to the client
     });
 });
-
-// Function to get product data by ID from the database
-async function getProductById(tableName, id) {
-    const query = `SELECT *, score FROM \`${tableName}\` WHERE id = ?`;
-    const connection = await db.getConnection();
-    try {
-      const [product] = await connection.execute(query, [id]);
-      return product;
-    } catch (error) {
-      console.error(`Error fetching product with ID ${id}: ${error}`);
-      throw error;
-    } finally {
-      connection.release(); // Don't forget to release the connection
-    }
-}
-  
   
 app.post('/submit-corrections', async (req, res) => {
     const { corrections, sessionId } = req.body;
@@ -108,75 +95,134 @@ app.post('/submit-corrections', async (req, res) => {
     if (!tableName) {
         return res.status(400).json({ message: 'Session ID is invalid or expired.' });
     }
-    try {
-        const headers = await getHeadersFromTable(tableName);
 
+    const connection = await db.getConnection(); // Get a connection from the pool
+
+    try {
+        await connection.beginTransaction(); // Start the transaction
+
+        const headers = await getHeadersFromTable(connection, tableName);
+
+        // First loop: Apply all corrections to the database
         for (const correction of corrections) {
             const { cell, row, newValue } = correction;
-            if (!cell || cell.length < 2) { // Validate cell format minimally
+            if (!cell || cell.length < 2) {
                 console.error(`Invalid cell format: ${cell}`);
-                continue; // Skip to next correction
+                continue;
             }
             const columnNameIndex = cell.charCodeAt(0) - 65; // Convert column letter to index
-            if (columnNameIndex < 0 || columnNameIndex >= headers.length) {
-                console.error(`Cell column out of range: ${cell}`);
-                continue; // Skip to next correction
-            }
-            const columnName = headers[columnNameIndex];
+            const columnName = headers[columnNameIndex]; // Assuming headers are in correct order
 
-            // Update cell value in the database
-            console.log(`Updating cell ${cell} in table ${tableName} with new value '${newValue}'...`);
-            await updateCellValue(tableName, columnName, row - 1, newValue); // Subtract 1 from the row number to align with database IDs if necessary
+            await updateCellValue(connection, tableName, columnName, row - 1, newValue); // Pass connection
         }
-        // Send success response after all corrections are processed
-        res.json({ message: 'Corrections updated and validated successfully.' });
+
+        await connection.commit(); // Commit the transaction after all updates are applied
+
+        // Second loop: Validate all rows after the updates
+        let correctedRows = [];
+        let validityErrors = [];
+        for (const correction of corrections) {
+            const { cell, row } = correction;
+            const adjustedRow = row - 1; // Adjust row number for zero-based index
+
+            const dbData = await getProductRowFromTable(connection, tableName, adjustedRow); // Pass connection
+            const productForValidation = transformDbDataForValidation(dbData, headers, adjustedRow); // Now pass headers and adjusted row as well
+            
+            const validationResult = validateRow(productForValidation);
+            if (validationResult.errors.length > 0) {
+                validityErrors.push({ row: adjustedRow + 1, errors: validationResult.errors }); // Add 1 to row for display purposes
+            } else {
+                correctedRows.push({ row: adjustedRow, score: validationResult.score });
+            }
+        }
+
+        // Update the product score for corrected rows
+        for (const correctedRow of correctedRows) {
+            await updateProductScore(connection, tableName, correctedRow.row, correctedRow.score); // Pass connection
+        }
+
+        let message = 'Corrections updated and validated successfully.';
+        if (validityErrors.length > 0) {
+            message = 'Corrections updated, but some values are still invalid.';
+        }
+
+        res.json({ message: message, validityErrors: validityErrors });
     } catch (error) {
-        // Handle errors
+        await connection.rollback(); // Rollback the transaction in case of an error
         console.error('An error occurred while updating corrections:', error);
         res.status(500).json({ message: 'An error occurred while updating corrections.', error: error.message });
+    } finally {
+        connection.release(); // Release the connection back to the pool
     }
 });
 
+// Make sure to update the other functions to accept a `connection` parameter and use it instead of `pool`.
+
+
+function transformDbDataForValidation(dbData, headers, rowNumber) {
+    const transformed = {};
+    headers.forEach((header, index) => {
+        const cell = `${String.fromCharCode(65 + index)}${rowNumber}`; // This creates a string like "A1", "B1", etc.
+        transformed[header] = { value: dbData[header], cell: cell };
+    });
+    return transformed;
+}
 
 
   
-  
-  async function updateCellValue(tableName, columnName, row, newValue) {
+async function updateCellValue(connection, tableName, columnName, row, newValue) {
     const updateQuery = `UPDATE \`${tableName}\` SET \`${columnName}\` = ? WHERE id = ?`;
     try {
-      await db.query(updateQuery, [newValue, row]);
+      await connection.execute(updateQuery, [newValue, row]);
       console.log(`Updated ${columnName} at row ${row} with value '${newValue}'`);
     } catch (error) {
       console.error(`Error updating cell: ${error}`);
-      throw error;
-    }
-  }
-
-  async function getHeadersFromTable(tableName) {
-    const query = `SHOW COLUMNS FROM \`${tableName}\`;`;
-    try {
-      const [columns] = await db.execute(query);
-      // Extract the field names from the columns
-      const headers = columns.map(column => column.Field);
-      return headers;
-    } catch (error) {
-      console.error(`Error getting headers from table '${tableName}': ${error}`);
-      throw error;
+      throw error; // Rethrow the error to handle it in the transaction block
     }
   }
   
 
-  async function updateProductScore(tableName, row, score) {
-    const updateScoreQuery = `UPDATE \`${tableName}\` SET \`score\` = ? WHERE id = ?`;
+  async function getHeadersFromTable(connection, tableName) {
+    const query = `SHOW COLUMNS FROM \`${tableName}\``;
     try {
-      await db.query(updateScoreQuery, [score, row]);
-      console.log(`Updated score for row ${row} with value '${score}'`);
+        const [columns] = await connection.execute(query);
+        // Extract the field names from the columns
+        const headers = columns.map(column => column.Field);
+        return headers;
     } catch (error) {
-      console.error(`Error updating score: ${error}`);
-      throw error;
+        console.error(`Error getting headers from table '${tableName}': ${error}`);
+        throw error;
     }
 }
-  
+
+async function updateProductScore(connection, tableName, row, score) {
+    const updateScoreQuery = `UPDATE \`${tableName}\` SET \`score\` = ? WHERE id = ?`;
+    try {
+        await connection.execute(updateScoreQuery, [score, row]);
+        console.log(`Updated score for row ${row} with value '${score}'`);
+    } catch (error) {
+        console.error(`Error updating score: ${error}`);
+        throw error;
+    }
+}
+
+
+async function getProductRowFromTable(connection, tableName, rowNumber) {
+    const selectQuery = `SELECT * FROM \`${tableName}\` WHERE id = ?`;
+    try {
+        const [rows] = await connection.execute(selectQuery, [rowNumber]);
+        if (rows.length === 0) {
+            throw new Error(`Row with id ${rowNumber} not found in table '${tableName}'.`);
+        }
+        return rows[0];
+    } catch (error) {
+        console.error(`Error retrieving row from table '${tableName}': ${error}`);
+        throw error;
+    }
+}
+
+
+
 
 function createTableName(filename) {
     const baseName = path.basename(filename, path.extname(filename));
@@ -225,26 +271,29 @@ function sanitizeColumnName(columnName) {
 function productToObject(productArray, categoryAttributes, headers, rowNumber) {
     const productObject = {};
 
-    // Assuming the first element of productArray is not used (ExcelJS starts at 1, not 0)
-    // Adjust the index by reducing it by 1 to align with zero-based array indexing
     headers.forEach((header, index) => {
         let adjustedIndex = index + 1; // Adjust the index for zero-based arrays
         let rawValue = productArray[adjustedIndex]; // Access the correct index in productArray
         let value = rawValue ? rawValue.toString().trim() : null;
         if (value === 'na' || value === '') value = null;
 
-        // Check if the value is not null and if it's an object with the 'text' property
-        if (value !== null && typeof value === 'object' && value.hasOwnProperty('text')) {
-            // Extract the string value from the object
-            value = value.text;
+        // Special handling for Certification_Verification and Availability
+        // to keep "Yes" or "No" values as they are
+        if (header === 'Certification_Verification' || header === 'Availability') {
+            // Directly assign "Yes" or "No" values without converting to boolean
+            productObject[header] = { value, cell: `${String.fromCharCode(65 + adjustedIndex - 1)}${rowNumber}` };
+            return; // Skip further processing for this attribute
         }
 
+        // For other attributes, continue with the existing processing logic
         if (value !== null && categoryAttributes[header]) {
             switch (categoryAttributes[header].type) {
                 case 'number':
                     value = isNaN(parseFloat(value)) ? null : parseFloat(value);
                     break;
                 case 'boolean':
+                    // Since we're bypassing boolean conversion for Certification_Verification and Availability,
+                    // this case will apply to other boolean attributes if any
                     value = value.toLowerCase() === 'yes' ? true : value.toLowerCase() === 'no' ? false : null;
                     break;
                 case 'string':
@@ -262,12 +311,13 @@ function productToObject(productArray, categoryAttributes, headers, rowNumber) {
             }
         }
 
-        // Save the value in the product object
+        // Assign the processed value to the product object
         productObject[header] = { value, cell: `${String.fromCharCode(65 + adjustedIndex - 1)}${rowNumber}` };
     });
 
     return productObject;
 }
+
 
 
 
@@ -301,225 +351,6 @@ function flattenProduct(product) {
         flatProduct[key] = attr.value;
     });
     return flatProduct;
-}
-
-function validateRow(product) {
-    const errors = [];
-    let score = 0; // Initialize score
-    Object.entries(product).forEach(([attribute, { value, cell }]) => {
-        if (value === null) return;
-        switch(attribute) {
-            case 'name':
-                if (!value || typeof value !== 'string' || value.length > 50 || !/^[a-zA-Z]/.test(value) || /[^a-zA-Z0-9 ]/.test(value)) {
-                    errors.push(`Invalid 'name' at cell ${cell}: '${value}'. Must be less than 50 characters, no special characters, and cannot start with numerals.`);
-                    // console.log(`Invalid 'name' at cell ${cell}: '${value}'. Must be less than 50 characters, no special characters, and cannot start with numerals.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'main_category':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'main_category' at cell ${cell}: '${value}'. Must be a valid category.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'sub_category':
-                // Similar to 'main_category', ensure 'sub_category' is valid
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'sub_category' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'image':
-                // Example validation might check if the value looks like a URL
-                if (!value || typeof value !== 'string' || !value.startsWith('http')) {
-                    errors.push(`Invalid 'image' URL at cell ${cell}: '${value}'. Must be a valid URL.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'link':
-                if (!value || typeof value !== 'string' || !value.startsWith('http')) {
-                    errors.push(`Invalid 'link' URL at cell ${cell}: '${value}'. Must be a valid URL.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'ratings':
-                // Assuming ratings should be a number between 0 and 5
-                if (isNaN(value) || value < 0 || value > 5) {
-                    errors.push(`Invalid 'ratings' at cell ${cell}: '${value}'. Must be a number between 0 and 5.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'no_of_ratings':
-                // Assuming a positive number
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'no_of_ratings' at cell ${cell}: '${value}'. Must be a positive number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'discount_price':
-                // Assuming a non-negative number, discount price should logically be less than actual price, but that's not validated here
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'discount_price' at cell ${cell}: '${value}'. Must be a non-negative number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'actual_price':
-                // Assuming a non-negative number
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'actual_price' at cell ${cell}: '${value}'. Must be a non-negative number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Extended_Warranty_Years':
-                if (isNaN(value) || value < 0 || value > 2) {
-                    errors.push(`Invalid 'Extended_Warranty_Years' at cell ${cell}: '${value}'. Must be between 0 and 2.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Basic_Warranty_Years':
-                if (isNaN(value) || value < 0 || value > 1) {
-                    errors.push(`Invalid 'Basic_Warranty_Years' at cell ${cell}: '${value}'. Must be between 0 and 1.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Date_of_manufacturing':
-                if (!value || isNaN(Date.parse(value))) {
-                    errors.push(`Invalid 'Date_of_manufacturing' at cell ${cell}: '${value}'. Must be a valid date.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Variants':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'Variants' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Certification_Verification':
-                if (value !== true && value !== false) {
-                    errors.push(`Invalid 'Certification_Verification' at cell ${cell}: '${value}'. Must be 'Yes' or 'No'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Availability':
-                if (value !== true && value !== false) {
-                    errors.push(`Invalid 'Availability' at cell ${cell}: '${value}'. Must be 'Yes' or 'No'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Expiry_Date':
-                if (!value || isNaN(Date.parse(value))) {
-                    errors.push(`Invalid 'Expiry_Date' at cell ${cell}: '${value}'. Must be a valid date.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Color':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'Color' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Brand_Value':
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'Brand_Value' at cell ${cell}: '${value}'. Must be a positive number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Size':
-                if (isNaN(value) && typeof value !== 'string') {
-                    errors.push(`Invalid 'Size' at cell ${cell}: '${value}'. Must be a valid size.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Nutrients':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'Nutrients' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Quantity':
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'Quantity' at cell ${cell}: '${value}'. Must be a positive number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Age_recommendition':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'Age_recommendition' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Sales_Last_30_Days':
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'Sales_Last_30_Days' at cell ${cell}: '${value}'. Must be a non-negative number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Number_of_Outlets':
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'Number_of_Outlets' at cell ${cell}: '${value}'. Must be a non-negative number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Searches_Last_30_Days':
-                if (isNaN(value) || value < 0) {
-                    errors.push(`Invalid 'Searches_Last_30_Days' at cell ${cell}: '${value}'. Must be a non-negative number.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Advertisement_Channels':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'Advertisement_Channels' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'material':
-                if (!value || typeof value !== 'string') {
-                    errors.push(`Invalid 'material' at cell ${cell}: '${value}'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-            case 'Gender':
-                if (value !== 'Male' && value !== 'Female') {
-                    errors.push(`Invalid 'Gender' at cell ${cell}: '${value}'. Must be 'Male' or 'Female'.`);
-                } else {
-                    score += 10;
-                }
-                break;
-        }
-    });
-
-    return {
-        isValid: errors.length === 0,
-        errors: errors,
-        score: score 
-    };
 }
 
 
