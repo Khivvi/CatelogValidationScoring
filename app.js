@@ -11,7 +11,7 @@ const sessionTables = {};
 const validateRow = require('./validation');
 
 const categories = JSON.parse(fs.readFileSync('./categories.json', 'utf8'));
-
+const totalcategoryscore = JSON.parse(fs.readFileSync('./score.json', 'utf8'));
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
@@ -37,30 +37,32 @@ app.post('/upload', upload.single('excel'), async (req, res) => {
 
     let validationErrors = [];
     let correctnessErrors = [];
-
+    totalpossiblescore = (worksheet.rowCount-1)*100;
+    let totalrowscore = 0;
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber++) {
         const row = worksheet.getRow(rowNumber);
         const productArray = [null, ...row.values];
-        const mainCategory = productArray[3]; // Adjust the index if necessary
+        const mainCategory = productArray[3]; 
         const categoryAttributes = categories[mainCategory];
-    
+        const totalscore = totalcategoryscore[mainCategory]
         if (!categoryAttributes) {
             console.log(`Invalid main_category '${mainCategory}' at row ${rowNumber}.`);
-            // When pushing main_category errors into the validationErrors array
+            
             correctnessErrors.push({
                 row: rowNumber,
                 errors: [`Invalid 'main_category' at cell C${rowNumber} with value '${mainCategory}'. Must be one of: [${Object.keys(categories).join(", ")}]`]
             });
 
-            continue; // Skip further processing for this row
+            continue; 
         }
     
         const product = productToObject(productArray, categoryAttributes, headers, rowNumber);
-        let errors = validateRequiredAttributes(product, categoryAttributes, rowNumber);
-        
-        // Call validateRow and capture returned errors
+        let validationResult1 = validateRequiredAttributes(product, categoryAttributes, rowNumber);
+        let errors = validationResult1.errors;
+        let score1 = validationResult1.score;
         let validationResult = validateRow(product);
-
+        let score2 = validationResult.score;
+        totalrowscore += ((score1+score2)/totalscore) * 100
         if (validationResult.errors.length > 0) {
             correctnessErrors.push({ row: rowNumber, errors: validationResult.errors });
         }
@@ -70,11 +72,13 @@ app.post('/upload', upload.single('excel'), async (req, res) => {
         }
     
         let flatProduct = flattenProduct(product);
-        flatProduct.score = validationResult.score; // Add score to the product for insertion
+        flatProduct.score = validationResult.score; 
     
-        // Insert product into table, including the score
+        
         await insertIntoTable(tableName, flatProduct);
     }
+    let catelogscore = totalrowscore/totalpossiblescore * 100
+    // console.log("Total catalog score:",catelogscore) ;
 
     const sessionId = req.sessionID || Math.random().toString(36).substring(2, 15);
     sessionTables[sessionId] = tableName;
@@ -85,7 +89,8 @@ app.post('/upload', upload.single('excel'), async (req, res) => {
         correctnessErrors: correctnessErrors,
         filePath: req.file.path,
         tableName: tableName,
-        sessionId: sessionId  // Send this back to the client
+        sessionId: sessionId,
+        catalogScore: catelogscore.toFixed(2)
     });
 });
   
@@ -96,73 +101,92 @@ app.post('/submit-corrections', async (req, res) => {
         return res.status(400).json({ message: 'Session ID is invalid or expired.' });
     }
 
-    const connection = await db.getConnection(); // Get a connection from the pool
+    const connection = await db.getConnection(); 
 
     try {
-        await connection.beginTransaction(); // Start the transaction
+        await connection.beginTransaction(); 
 
         const headers = await getHeadersFromTable(connection, tableName);
 
-        // First loop: Apply all corrections to the database
+        
         for (const correction of corrections) {
             const { cell, row, newValue } = correction;
             if (!cell || cell.length < 2) {
                 console.error(`Invalid cell format: ${cell}`);
                 continue;
             }
-            const columnNameIndex = cell.charCodeAt(0) - 65; // Convert column letter to index
-            const columnName = headers[columnNameIndex]; // Assuming headers are in correct order
+            const columnNameIndex = cell.charCodeAt(0) - 65; 
+            const columnName = headers[columnNameIndex]; 
 
-            await updateCellValue(connection, tableName, columnName, row - 1, newValue); // Pass connection
+            await updateCellValue(connection, tableName, columnName, row - 1, newValue); 
         }
 
-        await connection.commit(); // Commit the transaction after all updates are applied
+        await connection.commit(); 
 
-        // Second loop: Validate all rows after the updates
         let correctedRows = [];
         let validityErrors = [];
+        
         for (const correction of corrections) {
             const { cell, row } = correction;
-            const adjustedRow = row - 1; // Adjust row number for zero-based index
+            const adjustedRow = row - 1; 
 
-            const dbData = await getProductRowFromTable(connection, tableName, adjustedRow); // Pass connection
-            const productForValidation = transformDbDataForValidation(dbData, headers, adjustedRow); // Now pass headers and adjusted row as well
+            const dbData = await getProductRowFromTable(connection, tableName, adjustedRow); 
+            const productForValidation = transformDbDataForValidation(dbData, headers, adjustedRow); 
             
             const validationResult = validateRow(productForValidation);
             if (validationResult.errors.length > 0) {
-                validityErrors.push({ row: adjustedRow + 1, errors: validationResult.errors }); // Add 1 to row for display purposes
+                validityErrors.push({ row: adjustedRow + 1, errors: validationResult.errors }); 
             } else {
                 correctedRows.push({ row: adjustedRow, score: validationResult.score });
             }
         }
 
-        // Update the product score for corrected rows
         for (const correctedRow of correctedRows) {
-            await updateProductScore(connection, tableName, correctedRow.row, correctedRow.score); // Pass connection
+            await updateProductScore(connection, tableName, correctedRow.row, correctedRow.score);
         }
+        await connection.commit(); 
+        let totalscore = 0;
+        let calculatedScore = 0;
+        const [rows] = await connection.query(`SELECT score, main_category FROM \`${tableName}\``);
+        rows.forEach(row => {
+            const category = row.main_category; 
+            const score = row.score;
+            totalscore+=totalcategoryscore[category];
+            calculatedScore += score*2;
+        });
+
+        let catalogScore = (calculatedScore/totalscore) * 100;
+        // console.log(calculatedScore);
+        // console.log(totalscore);
+        console.log((calculatedScore/totalscore) * 100);
+
 
         let message = 'Corrections updated and validated successfully.';
         if (validityErrors.length > 0) {
             message = 'Corrections updated, but some values are still invalid.';
         }
 
-        res.json({ message: message, validityErrors: validityErrors });
+        res.json({ 
+            message: message, 
+            validityErrors: validityErrors,
+            catalogsScore:catalogScore.toFixed(2) 
+        });
     } catch (error) {
-        await connection.rollback(); // Rollback the transaction in case of an error
+        await connection.rollback(); 
         console.error('An error occurred while updating corrections:', error);
         res.status(500).json({ message: 'An error occurred while updating corrections.', error: error.message });
     } finally {
-        connection.release(); // Release the connection back to the pool
+        connection.release(); 
     }
 });
 
-// Make sure to update the other functions to accept a `connection` parameter and use it instead of `pool`.
+
 
 
 function transformDbDataForValidation(dbData, headers, rowNumber) {
     const transformed = {};
     headers.forEach((header, index) => {
-        const cell = `${String.fromCharCode(65 + index)}${rowNumber}`; // This creates a string like "A1", "B1", etc.
+        const cell = `${String.fromCharCode(65 + index)}${rowNumber}`; 
         transformed[header] = { value: dbData[header], cell: cell };
     });
     return transformed;
@@ -177,7 +201,7 @@ async function updateCellValue(connection, tableName, columnName, row, newValue)
       console.log(`Updated ${columnName} at row ${row} with value '${newValue}'`);
     } catch (error) {
       console.error(`Error updating cell: ${error}`);
-      throw error; // Rethrow the error to handle it in the transaction block
+      throw error; 
     }
   }
   
@@ -272,28 +296,26 @@ function productToObject(productArray, categoryAttributes, headers, rowNumber) {
     const productObject = {};
 
     headers.forEach((header, index) => {
-        let adjustedIndex = index + 1; // Adjust the index for zero-based arrays
-        let rawValue = productArray[adjustedIndex]; // Access the correct index in productArray
+        let adjustedIndex = index + 1; 
+        let rawValue = productArray[adjustedIndex]; 
         let value = rawValue ? rawValue.toString().trim() : null;
         if (value === 'na' || value === '') value = null;
 
-        // Special handling for Certification_Verification and Availability
-        // to keep "Yes" or "No" values as they are
+    
         if (header === 'Certification_Verification' || header === 'Availability') {
-            // Directly assign "Yes" or "No" values without converting to boolean
+           
             productObject[header] = { value, cell: `${String.fromCharCode(65 + adjustedIndex - 1)}${rowNumber}` };
-            return; // Skip further processing for this attribute
+            return; 
         }
 
-        // For other attributes, continue with the existing processing logic
+        
         if (value !== null && categoryAttributes[header]) {
             switch (categoryAttributes[header].type) {
                 case 'number':
                     value = isNaN(parseFloat(value)) ? null : parseFloat(value);
                     break;
                 case 'boolean':
-                    // Since we're bypassing boolean conversion for Certification_Verification and Availability,
-                    // this case will apply to other boolean attributes if any
+                    
                     value = value.toLowerCase() === 'yes' ? true : value.toLowerCase() === 'no' ? false : null;
                     break;
                 case 'string':
@@ -311,7 +333,6 @@ function productToObject(productArray, categoryAttributes, headers, rowNumber) {
             }
         }
 
-        // Assign the processed value to the product object
         productObject[header] = { value, cell: `${String.fromCharCode(65 + adjustedIndex - 1)}${rowNumber}` };
     });
 
@@ -324,11 +345,11 @@ function productToObject(productArray, categoryAttributes, headers, rowNumber) {
 
 function validateRequiredAttributes(product, categoryAttributes, rowNumber) {
     let errors = [];
-    // Iterate over each category attribute to check requirements
+    let score = 0;
     Object.entries(categoryAttributes).forEach(([attribute, config]) => {
         const value = product[attribute]?.value;
         const type = typeof value;
-        // Check if the attribute is required and missing or incorrectly typed
+        
         if (config.required && (value === null || value === 'na')) {
             errors.push(`Missing required value for '${attribute}' in row ${rowNumber}.`);
             console.log(`Missing required value for '${attribute}' in row ${rowNumber}.`)
@@ -337,17 +358,18 @@ function validateRequiredAttributes(product, categoryAttributes, rowNumber) {
                 errors.push(`Incorrect type for '${attribute}' in row ${rowNumber}. Expected number, got ${type}.`);
                 console.log(`Incorrect type for '${attribute}' in row ${rowNumber}. Expected number, got ${type}.`)
             }
-        } // Add similar checks for other types as necessary
+        }
+        else{
+            score += config.required ? 1 : 0;
+        } 
     });
-    return errors;
+    return {errors, score};
 }
 
 
 function flattenProduct(product) {
     let flatProduct = {};
     Object.entries(product).forEach(([key, attr]) => {
-        // Assume each attribute of product is an object with 'value' and possibly other properties like 'cell'
-        // We only want to keep the 'value' for database insertion
         flatProduct[key] = attr.value;
     });
     return flatProduct;

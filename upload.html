@@ -112,6 +112,7 @@
 
   <div id="validationResult" class="alert alert-custom"></div>
   <div id="errorListing" class="error-listing"></div>
+  <div id="catalogScoreDisplay" class="alert alert-info" style="display: none;"></div>
 </div>
 <script>
     $(document).ready(function() {
@@ -134,47 +135,74 @@
             $('#validationResult').hide();
             $('#errorListing').hide().empty();
           },
+          
           success: function(data) {
     if (data.sessionId) {
         sessionStorage.setItem('sessionId', data.sessionId); 
     }
-    let errorMessages = '';
-    if (!data.isValid) {
-        errorMessages += "<strong>Validation errors found:</strong><ul>";
-        if (data.validationErrors && data.validationErrors.length > 0) {
-            data.validationErrors.forEach(error => {
-                error.errors.forEach(err => {
-                    errorMessages += `<li>Row ${error.row}: ${err}</li>`;
-                });
-            });
-        }
-        if (data.correctnessErrors && data.correctnessErrors.length > 0) {
-            data.correctnessErrors.forEach(error => {
-                error.errors.forEach(err => {
-                    const errorDetail = err.split(' at cell ');
-                    const cell = errorDetail[1].split(': ')[0];
-                    const value = errorDetail[1].split(': ')[1].replace(/'$/, "");
-                    errorMessages += `<li>${errorDetail[0]} at cell ${cell} with value '${value}': `;
-                    errorMessages += `<input type='text' class='correction-input' `;
-                    errorMessages += `data-row='${error.row}' data-cell='${cell}' value='${value}'/></li>`;
-                });
-            });
-        }
-        errorMessages += "</ul><button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
+    let totalErrors = 0;
+    if (data.validationErrors) {
+        totalErrors += data.validationErrors.length;
+    }
+    if (data.correctnessErrors) {
+        data.correctnessErrors.forEach(error => {
+            totalErrors += error.errors.length;
+        });
+    }
+    
+    // New if statement to check if total errors exceed 50
+    if (totalErrors > 50) {
         $('#validationResult')
             .show()
             .removeClass('alert-success')
             .addClass('alert-danger')
-            .html(errorMessages);
+            .html("More than 50 validation errors found, please correct them and re-upload the file.");
     } else {
-        $('#validationResult')
-            .show()
-            .removeClass('alert-danger')
-            .addClass('alert-success')
-            .text(data.message);
-        $('#errorListing').empty().hide();
+        // Existing logic for handling under 50 errors
+        let errorMessages = '';
+        if (!data.isValid) {
+            errorMessages += "<strong>Validation errors found:</strong><ul>";
+            if (data.validationErrors && data.validationErrors.length > 0) {
+                data.validationErrors.forEach(error => {
+                    error.errors.forEach(err => {
+                        errorMessages += `<li>Row ${error.row}: ${err}</li>`;
+                    });
+                });
+            }
+            if (data.correctnessErrors && data.correctnessErrors.length > 0) {
+                data.correctnessErrors.forEach(error => {
+                    error.errors.forEach(err => {
+                        const errorDetail = err.split(' at cell ');
+                        const cell = errorDetail[1].split(': ')[0];
+                        const value = errorDetail[1].split(': ')[1].replace(/'$/, "");
+                        errorMessages += `<li>${errorDetail[0]} at cell ${cell} with value '${value}': `;
+                        errorMessages += `<input type='text' class='correction-input' `;
+                        errorMessages += `data-row='${error.row}' data-cell='${cell}' value='${value}'/></li>`;
+                    });
+                });
+            }
+            errorMessages += "</ul><button id='submitCorrections' class='btn btn-primary'>Submit Corrections</button>";
+            $('#validationResult')
+                .show()
+                .removeClass('alert-success')
+                .addClass('alert-danger')
+                .html(errorMessages);
+        } else {
+            $('#validationResult')
+                .show()
+                .removeClass('alert-danger')
+                .addClass('alert-success')
+                .text(data.message);
+            $('#errorListing').empty().hide();
+        }
+        if (typeof data.catalogScore !== 'undefined') {
+            $('#catalogScoreDisplay').text('Catalog Score: ' + data.catalogScore + '%').show();
+        } else {
+            $('#catalogScoreDisplay').hide();
+        }
     }
 },
+
 
           error: function(xhr) {
             $('#validationResult')
@@ -183,6 +211,7 @@
               .addClass('alert-danger')
               .text('Upload failed: ' + xhr.responseText);
             $('#errorListing').empty().hide();
+            $('#catalogScoreDisplay').text('Unable to calculate the score due to an error.').show();
           }
         });
       });
@@ -202,6 +231,9 @@
         contentType: 'application/json',
         data: JSON.stringify({ corrections, sessionId: sessionStorage.getItem('sessionId') }),
         success: function(response) {
+            if (typeof response.catalogsScore !== 'undefined') {
+        $('#catalogScoreDisplay').text('Catalog Score: ' + response.catalogsScore + '%').show();
+    }
     // Check if there are new validity errors after submitting corrections
     if (response.validityErrors && response.validityErrors.length > 0) {
         // Clear previous errors and correction inputs

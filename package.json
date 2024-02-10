@@ -1,0 +1,27 @@
+{
+  "name": "catelog-validation-score",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node ./bin/www",
+    "deploy": "gcloud app deploy"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.7.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Khivvi/CatelogValidationScoring.git"
+  },
+  "author": "Raunak Khinvasara",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Khivvi/CatelogValidationScoring/issues"
+  },
+  "homepage": "https://github.com/Khivvi/CatelogValidationScoring#readme"
+}
